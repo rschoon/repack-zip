@@ -7,4 +7,5 @@ edition = "2021"
 anyhow = "1.0.95"
 clap = { version = "4.5.23", features = ["derive"] }
 tempfile = "3.14.0"
+unicase = "2.8.1"
 zip = { version = "2.2.2", features = ["deflate-zopfli"] }

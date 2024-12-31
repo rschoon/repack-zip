@@ -1,28 +1,27 @@
 
+use std::cmp::Ordering;
 use std::fs::File;
 use std::io::{Read, Seek, Write};
 use std::path::Path;
 use zip::write::SimpleFileOptions;
 
-pub struct ProcessParams {
-    pub compress_threshold: u64
-}
+use super::params::{ProcessParams, Sort};
 
 pub fn process_file(filename: &Path, params: &ProcessParams) -> anyhow::Result<()> {
-    let mut output = {
-        let output = if let Some(parent) = filename.parent() {
-            tempfile::NamedTempFile::new_in(parent)
-        } else {
-            tempfile::NamedTempFile::new()
-        }?;
-        let mut zipout = zip::ZipWriter::new(output);
-
+    let Some(mut output) = ({
         let input = File::open(filename)?;
         let mut zipin = zip::ZipArchive::new(input)?;
 
-        copy_zip(&mut zipin, &mut zipout, params)?;
+        let mut zipout = create_zip(filename, params)?;
 
-        zipout.finish()?
+        copy_zip(&mut zipin, zipout.as_mut(), params)?;
+
+        match zipout {
+            Some(z) => Some(z.finish()?),
+            None => None,
+        }
+    }) else {
+        return Ok(());
     };
 
     output.flush()?;
@@ -31,13 +30,38 @@ pub fn process_file(filename: &Path, params: &ProcessParams) -> anyhow::Result<(
     Ok(())
 }
 
+fn create_zip(filename: &Path, params: &ProcessParams) -> anyhow::Result<Option<zip::ZipWriter<tempfile::NamedTempFile>>> {
+    if params.dry_run {
+        return Ok(None);
+    }
+    
+    let output = if let Some(parent) = filename.parent() {
+        tempfile::NamedTempFile::new_in(parent)
+    } else {
+        tempfile::NamedTempFile::new()
+    }?;
+    Ok(Some(zip::ZipWriter::new(output)))
+}
+
 fn copy_zip(
     src: &mut zip::ZipArchive<impl Read + Seek>,
-    dest: &mut zip::ZipWriter<impl Write + Seek>,
+    mut dest: Option<&mut zip::ZipWriter<impl Write + Seek>>,
     params: &ProcessParams,
 ) -> anyhow::Result<()> {
-    for i in 0..src.len() {
-        let mut entry = src.by_index(i)?;
+    let mut items = (0..src.len()).map(|idx|{
+        Entry {
+            idx,
+            name: src.name_for_index(idx).map(Into::into)
+        }
+    }).collect::<Vec<_>>();
+
+    sort_entries(&mut items, params.sort);
+
+    for item in items {
+        let mut entry = src.by_index(item.idx)?;
+        println!("{}", entry.name());
+        
+        let Some(dest) = dest.as_deref_mut() else { continue };
         if entry.is_dir() {
             dest.add_directory(entry.name(), SimpleFileOptions::default())?;
         } else if entry.is_symlink() {
@@ -59,4 +83,27 @@ fn copy_zip(
     }
 
     Ok(())
+}
+
+fn sort_entries(items: &mut [Entry], sort: Option<Sort>) {
+    let Some(sort) = sort else { return };
+
+    let cmp: fn(&Entry, &Entry) -> Ordering = match sort {
+        Sort::Normal => |a, b| a.name.cmp(&b.name),
+        Sort::IgnoreCase => |a, b| unicase_cmp(a.name.as_deref(), b.name.as_deref())
+    };
+
+    items.sort_by(cmp);
+}
+
+fn unicase_cmp(a: Option<&str>, b: Option<&str>) -> Ordering {
+    use unicase::UniCase;
+    let key_a = a.map(UniCase::new);
+    let key_b = b.map(UniCase::new);
+    key_a.cmp(&key_b)
+}
+
+struct Entry {
+    idx: usize,
+    name: Option<Box<str>>,
 }
